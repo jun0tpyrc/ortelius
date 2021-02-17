@@ -9,7 +9,7 @@ import (
 	"path"
 
 	"github.com/ava-labs/ortelius/services"
-	kafkaMessage "github.com/segmentio/kafka-go"
+	kafkaMessage "github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
 var (

@@ -5,7 +5,10 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/ava-labs/ortelius/services/db"
 
@@ -13,7 +16,7 @@ import (
 
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/utils/wrappers"
-	"github.com/segmentio/kafka-go"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 
 	"github.com/ava-labs/ortelius/cfg"
 	"github.com/ava-labs/ortelius/services"
@@ -21,12 +24,12 @@ import (
 
 // consumer takes events from Kafka and sends them to a service consumer
 type consumerconsensus struct {
-	id       string
-	chainID  string
-	reader   *kafka.Reader
-	consumer services.Consumer
-	conns    *services.Connections
-	sc       *services.Control
+	id            string
+	chainID       string
+	kafkaConsumer *kafka.Consumer
+	consumer      services.Consumer
+	conns         *services.Connections
+	sc            *services.Control
 
 	// metrics
 	metricProcessedCountKey       string
@@ -45,7 +48,17 @@ func NewConsumerConsensusFactory(factory serviceConsumerFactory) ProcessorFactor
 			return nil, err
 		}
 
+		kafkaConsumer, err := kafka.NewConsumer(&kafka.ConfigMap{
+			"bootstrap.servers":  strings.Join(conf.Stream.Kafka.Brokers, ","),
+			"group.id":           conf.Stream.Consumer.GroupName,
+			"session.timeout.ms": 6000,
+			"auto.offset.reset":  "earliest"})
+		if err != nil {
+			return nil, err
+		}
+
 		c := &consumerconsensus{
+			kafkaConsumer:                 kafkaConsumer,
 			chainID:                       chainID,
 			conns:                         conns,
 			sc:                            sc,
@@ -64,7 +77,9 @@ func NewConsumerConsensusFactory(factory serviceConsumerFactory) ProcessorFactor
 		// Create consumer backend
 		c.consumer, err = factory(conf.NetworkID, chainVM, chainID)
 		if err != nil {
-			c.Close()
+			if err := c.Close(); err != nil {
+				return nil, err
+			}
 			return nil, err
 		}
 
@@ -75,27 +90,6 @@ func NewConsumerConsensusFactory(factory serviceConsumerFactory) ProcessorFactor
 		}
 		if !conf.Consumer.StartTime.IsZero() {
 			c.groupName = ""
-		}
-
-		topicName := GetTopicName(conf.NetworkID, chainID, EventTypeConsensus)
-		// Create reader for the topic
-		c.reader = kafka.NewReader(kafka.ReaderConfig{
-			Topic:       topicName,
-			Brokers:     conf.Kafka.Brokers,
-			GroupID:     c.groupName,
-			StartOffset: kafka.FirstOffset,
-			MaxBytes:    ConsumerMaxBytesDefault,
-		})
-
-		// If the start time is set then seek to the correct offset
-		if !conf.Consumer.StartTime.IsZero() {
-			ctx, cancelFn := context.WithTimeout(context.Background(), kafkaReadTimeout)
-			defer cancelFn()
-
-			if err = c.reader.SetOffsetAt(ctx, conf.Consumer.StartTime); err != nil {
-				c.Close()
-				return nil, err
-			}
 		}
 
 		return c, nil
@@ -110,9 +104,7 @@ func (c *consumerconsensus) ID() string {
 func (c *consumerconsensus) Close() error {
 	c.sc.Log.Info("close %s", c.id)
 	errs := wrappers.Errs{}
-	if c.reader != nil {
-		errs.Add(c.reader.Close())
-	}
+	errs.Add(c.kafkaConsumer.Close())
 	if c.conns != nil {
 		errs.Add(c.conns.Close())
 	}
@@ -183,34 +175,48 @@ func (c *consumerconsensus) Success() {
 }
 
 func (c *consumerconsensus) commitMessage(msg services.Consumable) error {
-	ctx, cancelFn := context.WithTimeout(context.Background(), kafkaReadTimeout)
-	defer cancelFn()
-	return c.reader.CommitMessages(ctx, *msg.KafkaMessage())
+	if _, err := c.kafkaConsumer.CommitMessage(msg.KafkaMessage()); err != nil {
+		return err
+	}
+	return nil
 }
 
 // getNextMessage gets the next Message from the Kafka Indexer
 func (c *consumerconsensus) getNextMessage(ctx context.Context) (*Message, error) {
 	// Get raw Message from Kafka
-	msg, err := c.reader.FetchMessage(ctx)
-	if err != nil {
-		return nil, err
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(5 * time.Second)
 	}
 
-	m := &Message{
-		chainID:      c.chainID,
-		body:         msg.Value,
-		timestamp:    msg.Time.UTC().Unix(),
-		nanosecond:   int64(msg.Time.UTC().Nanosecond()),
-		kafkaMessage: &msg,
+	ev := c.kafkaConsumer.Poll(int(time.Until(deadline).Milliseconds()))
+	if ev == nil {
+		return nil, nil
 	}
 
-	// Extract Message ID from key
-	id, err := ids.ToID(msg.Key)
-	if err != nil {
-		m.id = string(msg.Key)
-	} else {
-		m.id = id.String()
-	}
+	var msg *Message
+	switch e := ev.(type) {
+	case *kafka.Message:
+		msg = &Message{
+			chainID:      c.chainID,
+			body:         e.Value,
+			timestamp:    e.Timestamp.UTC().Unix(),
+			nanosecond:   int64(e.Timestamp.UTC().Nanosecond()),
+			kafkaMessage: e,
+		}
 
-	return m, nil
+		// Extract Message ID from key
+		id, err := ids.ToID(e.Key)
+		if err != nil {
+			msg.id = string(e.Key)
+		} else {
+			msg.id = id.String()
+		}
+
+		return msg, nil
+	case kafka.Error:
+		return nil, errors.New(e.Error())
+	default:
+		return nil, nil
+	}
 }

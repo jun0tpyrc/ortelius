@@ -6,7 +6,7 @@ import (
 
 	cblock "github.com/ava-labs/ortelius/models"
 
-	kafkaMessage "github.com/segmentio/kafka-go"
+	kafkaMessage "github.com/confluentinc/confluent-kafka-go/kafka"
 
 	"github.com/gocraft/dbr/v2"
 	"github.com/gocraft/health"

@@ -5,6 +5,8 @@ package stream
 
 import (
 	"fmt"
+	"github.com/ava-labs/avalanchego/utils/hashing"
+	"strings"
 
 	"github.com/ava-labs/avalanchego/utils/wrappers"
 
@@ -12,16 +14,21 @@ import (
 	"github.com/ava-labs/ortelius/cfg"
 	"github.com/ava-labs/ortelius/services"
 	"github.com/ava-labs/ortelius/services/metrics"
+
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
 // producer reads from the socket and writes to the event stream
 type Producer struct {
-	id          string
-	chainID     string
-	eventType   EventType
-	sock        *socket.Client
-	writeBuffer *bufferedWriter
-	sc          *services.Control
+	id        string
+	chainID   string
+	eventType EventType
+	sock      *socket.Client
+
+	kafkaProducer  *kafka.Producer
+	kafkaPartition kafka.TopicPartition
+
+	sc *services.Control
 
 	// metrics
 	metricProcessedCountKey string
@@ -36,16 +43,25 @@ func NewProducer(sc *services.Control, conf cfg.Config, _ string, chainID string
 		return nil, err
 	}
 
+	kafkaProducer, err := kafka.NewProducer(&kafka.ConfigMap{
+		"bootstrap.servers": strings.Join(conf.Stream.Kafka.Brokers, ","),
+	})
+
+	topicName := GetTopicName(conf.NetworkID, chainID, eventType)
+
 	p := &Producer{
-		chainID:                 chainID,
-		eventType:               eventType,
-		writeBuffer:             newBufferedWriter(sc.Log, conf.Brokers, GetTopicName(conf.NetworkID, chainID, eventType)),
+		chainID:   chainID,
+		eventType: eventType,
+
+		kafkaProducer:  kafkaProducer,
+		kafkaPartition: kafka.TopicPartition{Topic: &topicName, Partition: kafka.PartitionAny},
+
 		sc:                      sc,
 		sock:                    sock,
 		metricProcessedCountKey: fmt.Sprintf("produce_records_processed_%s_%s", chainID, eventType),
 		metricSuccessCountKey:   fmt.Sprintf("produce_records_success_%s_%s", chainID, eventType),
 		metricFailureCountKey:   fmt.Sprintf("produce_records_failure_%s_%s", chainID, eventType),
-		id:                      fmt.Sprintf("producer %d %s %s", conf.NetworkID, chainID, eventType),
+		id:                      fmt.Sprintf("kafkaProducer %d %s %s", conf.NetworkID, chainID, eventType),
 	}
 	metrics.Prometheus.CounterInit(p.metricProcessedCountKey, "records processed")
 	metrics.Prometheus.CounterInit(p.metricSuccessCountKey, "records success")
@@ -69,9 +85,7 @@ func NewDecisionsProducerProcessor(sc *services.Control, conf cfg.Config, chainV
 func (p *Producer) Close() error {
 	p.sc.Log.Info("close %s", p.id)
 	errs := wrappers.Errs{}
-	if p.writeBuffer != nil {
-		errs.Add(p.writeBuffer.close())
-	}
+	p.kafkaProducer.Close()
 	if p.sock != nil {
 		errs.Add(p.sock.Close())
 	}
@@ -91,7 +105,11 @@ func (p *Producer) ProcessNextMessage() error {
 		return err
 	}
 
-	p.writeBuffer.Write(rawMsg)
+	p.kafkaProducer.ProduceChannel() <- &kafka.Message{
+		Key:            hashing.ComputeHash256(rawMsg),
+		Value:          rawMsg,
+		TopicPartition: p.kafkaPartition,
+	}
 
 	_ = metrics.Prometheus.CounterInc(p.metricProcessedCountKey)
 	_ = metrics.Prometheus.CounterInc(services.MetricProduceProcessedCountKey)

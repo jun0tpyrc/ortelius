@@ -8,6 +8,7 @@ require (
 	github.com/alicebob/miniredis v2.5.0+incompatible
 	github.com/ava-labs/avalanchego v1.1.5
 	github.com/ava-labs/coreth v0.3.21
+	github.com/confluentinc/confluent-kafka-go v1.5.2
 	github.com/ethereum/go-ethereum v1.9.23
 	github.com/go-redis/cache/v8 v8.2.1
 	github.com/go-redis/redis/v8 v8.3.2
@@ -23,4 +24,5 @@ require (
 	github.com/spf13/cobra v1.1.1
 	github.com/spf13/viper v1.7.1
 	github.com/yuin/gopher-lua v0.0.0-20200816102855-ee81675732da // indirect
+	gopkg.in/confluentinc/confluent-kafka-go.v1 v1.5.2 // indirect
 )

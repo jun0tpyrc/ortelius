@@ -5,8 +5,10 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,7 +24,7 @@ import (
 
 	"github.com/ava-labs/ortelius/utils"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 
 	"github.com/ava-labs/ortelius/services"
 
@@ -31,8 +33,9 @@ import (
 )
 
 type ConsumerCChain struct {
-	id string
-	sc *services.Control
+	id            string
+	sc            *services.Control
+	kafkaConsumer *kafka.Consumer
 
 	// metrics
 	metricProcessedCountKey       string
@@ -40,9 +43,8 @@ type ConsumerCChain struct {
 	metricSuccessCountKey         string
 	metricFailureCountKey         string
 
-	conns  *services.Connections
-	reader *kafka.Reader
-	conf   cfg.Config
+	conns *services.Connections
+	conf  cfg.Config
 
 	// Concurrency control
 	quitCh   chan struct{}
@@ -154,37 +156,44 @@ func (c *ConsumerCChain) nextMessage() (*Message, error) {
 	return c.getNextMessage(ctx)
 }
 
-func (c *ConsumerCChain) commitMessage(msg services.Consumable) error {
-	ctx, cancelFn := context.WithTimeout(context.Background(), kafkaReadTimeout)
-	defer cancelFn()
-	return c.reader.CommitMessages(ctx, *msg.KafkaMessage())
-}
-
 // getNextMessage gets the next Message from the Kafka Indexer
 func (c *ConsumerCChain) getNextMessage(ctx context.Context) (*Message, error) {
 	// Get raw Message from Kafka
-	msg, err := c.reader.FetchMessage(ctx)
-	if err != nil {
-		return nil, err
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(5 * time.Second)
 	}
 
-	m := &Message{
-		chainID:      c.conf.CchainID,
-		body:         msg.Value,
-		timestamp:    msg.Time.UTC().Unix(),
-		nanosecond:   int64(msg.Time.UTC().Nanosecond()),
-		kafkaMessage: &msg,
+	ev := c.kafkaConsumer.Poll(int(time.Until(deadline).Milliseconds()))
+	if ev == nil {
+		return nil, nil
 	}
 
-	// Extract Message ID from key
-	id, err := ids.ToID(msg.Key)
-	if err != nil {
-		m.id = string(msg.Key)
-	} else {
-		m.id = id.String()
-	}
+	var msg *Message
+	switch e := ev.(type) {
+	case *kafka.Message:
+		msg = &Message{
+			chainID:      c.conf.CchainID,
+			body:         e.Value,
+			timestamp:    e.Timestamp.UTC().Unix(),
+			nanosecond:   int64(e.Timestamp.UTC().Nanosecond()),
+			kafkaMessage: e,
+		}
 
-	return m, nil
+		// Extract Message ID from key
+		id, err := ids.ToID(e.Key)
+		if err != nil {
+			msg.id = string(e.Key)
+		} else {
+			msg.id = id.String()
+		}
+
+		return msg, nil
+	case kafka.Error:
+		return nil, errors.New(e.Error())
+	default:
+		return nil, nil
+	}
 }
 
 func (c *ConsumerCChain) Failure() {
@@ -195,6 +204,13 @@ func (c *ConsumerCChain) Failure() {
 func (c *ConsumerCChain) Success() {
 	_ = metrics.Prometheus.CounterInc(c.metricSuccessCountKey)
 	_ = metrics.Prometheus.CounterInc(services.MetricConsumeSuccessCountKey)
+}
+
+func (c *ConsumerCChain) commitMessage(msg services.Consumable) error {
+	if _, err := c.kafkaConsumer.CommitMessage(msg.KafkaMessage()); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *ConsumerCChain) Listen() error {
@@ -258,15 +274,28 @@ func (c *ConsumerCChain) init() error {
 
 	c.consumer = consumer
 
+	// Create Kafka consumer
+	c.kafkaConsumer, err = kafka.NewConsumer(&kafka.ConfigMap{
+		"bootstrap.servers":  strings.Join(c.conf.Stream.Kafka.Brokers, ","),
+		"group.id":           c.conf.Stream.Consumer.GroupName,
+		"session.timeout.ms": 6000,
+		"auto.offset.reset":  "earliest"})
+	if err != nil {
+		return err
+	}
+
+	err = c.kafkaConsumer.SubscribeTopics([]string{GetTopicName(c.conf.NetworkID, c.conf.CchainID, EventTypeDecisions)}, nil)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (c *ConsumerCChain) processorClose() error {
 	c.sc.Log.Info("processorClose %s", c.id)
 	errs := wrappers.Errs{}
-	if c.reader != nil {
-		errs.Add(c.reader.Close())
-	}
+	errs.Add(c.kafkaConsumer.Close())
 	if c.conns != nil {
 		errs.Add(c.conns.Close())
 	}
@@ -294,21 +323,6 @@ func (c *ConsumerCChain) runProcessor() error {
 	if err != nil {
 		return err
 	}
-
-	// Setup config
-	c.groupName = c.conf.Consumer.GroupName
-	if c.groupName == "" {
-		c.groupName = c.consumer.Name()
-	}
-
-	topicName := fmt.Sprintf("%d-%s-cchain", c.conf.NetworkID, c.conf.CchainID)
-	c.reader = kafka.NewReader(kafka.ReaderConfig{
-		Topic:       topicName,
-		Brokers:     c.conf.Kafka.Brokers,
-		GroupID:     c.groupName,
-		StartOffset: kafka.FirstOffset,
-		MaxBytes:    ConsumerMaxBytesDefault,
-	})
 
 	// Create a closure that processes the next message from the backend
 	var (

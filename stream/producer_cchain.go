@@ -25,7 +25,7 @@ import (
 
 	"github.com/ava-labs/avalanchego/utils/hashing"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 
 	"github.com/ava-labs/coreth"
 
@@ -52,6 +52,9 @@ type ProducerCChain struct {
 	id string
 	sc *services.Control
 
+	kafkaProducer  *kafka.Producer
+	kafkaPartition kafka.TopicPartition
+
 	// metrics
 	metricProcessedCountKey string
 	metricSuccessCountKey   string
@@ -61,7 +64,6 @@ type ProducerCChain struct {
 	ethClient *ethclient.Client
 	conns     *services.Connections
 	block     *big.Int
-	writer    *kafka.Writer
 	conf      cfg.Config
 
 	// Concurrency control
@@ -73,26 +75,27 @@ func NewProducerCChain() utils.ListenCloserFactory {
 	return func(sc *services.Control, conf cfg.Config) utils.ListenCloser {
 		topicName := fmt.Sprintf("%d-%s-cchain", conf.NetworkID, conf.CchainID)
 
-		writer := kafka.NewWriter(kafka.WriterConfig{
-			Brokers:      conf.Brokers,
-			Topic:        topicName,
-			Balancer:     &kafka.LeastBytes{},
-			BatchBytes:   ConsumerMaxBytesDefault,
-			BatchSize:    defaultBufferedWriterSize,
-			WriteTimeout: defaultWriteTimeout,
-			RequiredAcks: int(kafka.RequireAll),
+		kafkaProducer, err := kafka.NewProducer(&kafka.ConfigMap{
+			"bootstrap.servers": strings.Join(conf.Stream.Kafka.Brokers, ","),
 		})
+		if err != nil {
+			panic("err: " + err.Error())
+			return nil
+		}
 
 		p := &ProducerCChain{
+			kafkaProducer:  kafkaProducer,
+			kafkaPartition: kafka.TopicPartition{Topic: &topicName, Partition: kafka.PartitionAny},
+
 			conf:                    conf,
 			sc:                      sc,
 			metricProcessedCountKey: fmt.Sprintf("produce_records_processed_%s_cchain", conf.CchainID),
 			metricSuccessCountKey:   fmt.Sprintf("produce_records_success_%s_cchain", conf.CchainID),
 			metricFailureCountKey:   fmt.Sprintf("produce_records_failure_%s_cchain", conf.CchainID),
-			id:                      fmt.Sprintf("producer %d %s cchain", conf.NetworkID, conf.CchainID),
-			writer:                  writer,
-			quitCh:                  make(chan struct{}),
-			doneCh:                  make(chan struct{}),
+			id:                      fmt.Sprintf("kafkaProducer %d %s cchain", conf.NetworkID, conf.CchainID),
+
+			quitCh: make(chan struct{}),
+			doneCh: make(chan struct{}),
 		}
 		metrics.Prometheus.CounterInit(p.metricProcessedCountKey, "records processed")
 		metrics.Prometheus.CounterInit(p.metricSuccessCountKey, "records success")
@@ -107,6 +110,7 @@ func NewProducerCChain() utils.ListenCloserFactory {
 func (p *ProducerCChain) Close() error {
 	close(p.quitCh)
 	<-p.doneCh
+	p.kafkaProducer.Close()
 	return nil
 }
 
@@ -129,11 +133,14 @@ func (p *ProducerCChain) readBlockFromRPC(blockNumber *big.Int) (*types.Block, e
 	return bl, nil
 }
 
-func (p *ProducerCChain) writeMessagesToKafka(messages ...kafka.Message) error {
-	ctx, cancelCTX := context.WithTimeout(context.Background(), kafkaWriteTimeout)
-	defer cancelCTX()
-
-	return p.writer.WriteMessages(ctx, messages...)
+func (p *ProducerCChain) writeMessagesToKafka(messages ...kafka.Message) {
+	for _, msg := range messages {
+		p.kafkaProducer.ProduceChannel() <- &kafka.Message{
+			Key:            msg.Key,
+			Value:          msg.Value,
+			TopicPartition: p.kafkaPartition,
+		}
+	}
 }
 
 func (p *ProducerCChain) updateBlock(blockNumber *big.Int, updateTime time.Time) error {
@@ -203,10 +210,7 @@ func (p *ProducerCChain) ProcessNextMessage() error {
 
 		localBlocks = make([]*localBlockObject, 0, blocksToQueue)
 
-		err := p.writeMessagesToKafka(kafkaMessages...)
-		if err != nil {
-			return err
-		}
+		p.writeMessagesToKafka(kafkaMessages...)
 
 		for _, blockNumber := range blockNumberUpdates {
 			err := p.updateBlock(blockNumber, time.Now().UTC())
