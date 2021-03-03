@@ -8,9 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ava-labs/ortelius/utils"
 
@@ -376,7 +375,11 @@ func (w *Writer) handleAbi(tag string, cabi *utils.ContractAbi, addr string, ini
 		}
 
 		j, err := json.Marshal(args)
-		log.Info("in", tag, addr, method.Name, method.Type, string(j))
+		if err != nil {
+			return err
+		}
+
+		log.Println("in", tag, addr, method.Name, method.Type, string(j))
 	}
 	if outputput != nil && *outputput != "0x" {
 		output := *outputput
@@ -401,7 +404,11 @@ func (w *Writer) handleAbi(tag string, cabi *utils.ContractAbi, addr string, ini
 		}
 
 		j, err := json.Marshal(args)
-		log.Info("out", tag, addr, method.Name, method.Type, string(j))
+		if err != nil {
+			return err
+		}
+
+		log.Println("out", tag, addr, method.Name, method.Type, string(j))
 	}
 
 	return nil
