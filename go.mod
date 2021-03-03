@@ -8,7 +8,7 @@ require (
 	github.com/alicebob/miniredis v2.5.0+incompatible
 	github.com/ava-labs/avalanchego v1.2.1
 	github.com/ava-labs/coreth v0.3.24
-	github.com/ethereum/go-ethereum v1.9.25
+	github.com/ethereum/go-ethereum v1.9.23
 	github.com/go-redis/cache/v8 v8.2.1
 	github.com/go-redis/redis/v8 v8.3.2
 	github.com/go-sql-driver/mysql v1.5.0
