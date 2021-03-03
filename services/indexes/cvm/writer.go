@@ -5,9 +5,14 @@ package cvm
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/ethereum/go-ethereum/log"
+
+	"github.com/ava-labs/ortelius/utils"
 
 	cblock "github.com/ava-labs/ortelius/models"
 
@@ -34,12 +39,18 @@ type Writer struct {
 	networkID   uint32
 	avaxAssetID ids.ID
 
-	codec codec.Manager
-	avax  *avaxIndexer.Writer
+	codec   codec.Manager
+	avax    *avaxIndexer.Writer
+	abiUtil *utils.AbiUtil
 }
 
 func NewWriter(networkID uint32, chainID string) (*Writer, error) {
 	_, avaxAssetID, err := genesis.Genesis(networkID, "")
+	if err != nil {
+		return nil, err
+	}
+
+	abiUtil, err := utils.NewAbi(networkID)
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +60,7 @@ func NewWriter(networkID uint32, chainID string) (*Writer, error) {
 		avaxAssetID: avaxAssetID,
 		codec:       evm.Codec,
 		avax:        avaxIndexer.NewWriter(chainID, avaxAssetID),
+		abiUtil:     abiUtil,
 	}, nil
 }
 
@@ -103,6 +115,10 @@ func (w *Writer) ConsumeTrace(ctx context.Context, conns *services.Connections, 
 	err = persist.InsertCvmTransactionsTxdataTrace(ctx, dbTx, txTraceService, cfg.PerformUpdates)
 	if err != nil {
 		return err
+	}
+
+	if cabi, ok := w.abiUtil.Abis[txTraceModel.FromAddr]; ok && txTraceModel.Input != nil && *txTraceModel.Input != "0x" {
+		w.handleAbi(cabi, txTraceModel.FromAddr, *txTraceModel.Input)
 	}
 
 	return dbTx.Commit()
@@ -331,4 +347,33 @@ func (w *Writer) indexImportTx(ctx services.ConsumerCtx, txID ids.ID, tx *evm.Un
 	}
 
 	return w.indexTransaction(ctx, txID, models.CChainImport, tx.BlockchainID, totalin-totalout, unsignedBytes)
+}
+
+func (w *Writer) handleAbi(cabi *utils.ContractAbi, addr string, input string) error {
+	decodedSig, err := hex.DecodeString(input[2:10])
+	if err != nil {
+		return err
+	}
+
+	method, err := cabi.AbiTool.MethodById(decodedSig)
+	if err != nil {
+		return err
+	}
+
+	// decode txInput Payload
+	decodedData, err := hex.DecodeString(input[10:])
+	if err != nil {
+		return err
+	}
+
+	args, err := method.Inputs.Unpack(decodedData)
+	if err != nil {
+		return err
+	}
+
+	j, err := json.Marshal(args)
+
+	log.Info("m", addr, method.Name, method.Type, string(j))
+
+	return nil
 }
