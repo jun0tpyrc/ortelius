@@ -9,10 +9,10 @@ type ContractAbi struct {
 	Optimization    bool
 	ConstructorArgs string
 	Abis            string
-	AbiTool abi.ABI
+	AbiTool         abi.ABI
 }
 
-var ContractAbis1  = []*ContractAbi{
+var ContractAbis1 = []*ContractAbi{
 	{
 		Address:         `0x9ad32bf5dafe152cbe027398219611db4e8753b3`,
 		Name:            `Multicall`,

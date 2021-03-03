@@ -120,6 +120,9 @@ func (w *Writer) ConsumeTrace(ctx context.Context, conns *services.Connections, 
 	if cabi, ok := w.abiUtil.Abis[txTraceModel.FromAddr]; ok && txTraceModel.Input != nil && *txTraceModel.Input != "0x" {
 		w.handleAbi(cabi, txTraceModel.FromAddr, *txTraceModel.Input)
 	}
+	if cabi, ok := w.abiUtil.Abis[txTraceModel.ToAddr]; ok && txTraceModel.Input != nil && *txTraceModel.Input != "0x" {
+		w.handleAbi(cabi, txTraceModel.ToAddr, *txTraceModel.Input)
+	}
 
 	return dbTx.Commit()
 }
