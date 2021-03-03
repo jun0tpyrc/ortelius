@@ -117,11 +117,11 @@ func (w *Writer) ConsumeTrace(ctx context.Context, conns *services.Connections, 
 		return err
 	}
 
-	if cabi, ok := w.abiUtil.Abis[txTraceModel.FromAddr]; ok && txTraceModel.Input != nil && *txTraceModel.Input != "0x" {
-		w.handleAbi(cabi, txTraceModel.FromAddr, *txTraceModel.Input)
+	if cabi, ok := w.abiUtil.Abis[txTraceModel.FromAddr]; ok {
+		w.handleAbi("f", cabi, txTraceModel.FromAddr, txTraceModel.Input, txTraceModel.Output)
 	}
-	if cabi, ok := w.abiUtil.Abis[txTraceModel.ToAddr]; ok && txTraceModel.Input != nil && *txTraceModel.Input != "0x" {
-		w.handleAbi(cabi, txTraceModel.ToAddr, *txTraceModel.Input)
+	if cabi, ok := w.abiUtil.Abis[txTraceModel.ToAddr]; ok {
+		w.handleAbi("t", cabi, txTraceModel.ToAddr, txTraceModel.Input, txTraceModel.Output)
 	}
 
 	return dbTx.Commit()
@@ -352,31 +352,57 @@ func (w *Writer) indexImportTx(ctx services.ConsumerCtx, txID ids.ID, tx *evm.Un
 	return w.indexTransaction(ctx, txID, models.CChainImport, tx.BlockchainID, totalin-totalout, unsignedBytes)
 }
 
-func (w *Writer) handleAbi(cabi *utils.ContractAbi, addr string, input string) error {
-	decodedSig, err := hex.DecodeString(input[2:10])
-	if err != nil {
-		return err
+func (w *Writer) handleAbi(tag string, cabi *utils.ContractAbi, addr string, ininput *string, outputput *string) error {
+	if ininput != nil && *ininput != "0x" {
+		input := *ininput
+		decodedSig, err := hex.DecodeString(input[2:10])
+		if err != nil {
+			return err
+		}
+
+		method, err := cabi.AbiTool.MethodById(decodedSig)
+		if err != nil {
+			return err
+		}
+
+		decodedData, err := hex.DecodeString(input[10:])
+		if err != nil {
+			return err
+		}
+
+		args, err := method.Inputs.Unpack(decodedData)
+		if err != nil {
+			return err
+		}
+
+		j, err := json.Marshal(args)
+		log.Info("in", tag, addr, method.Name, method.Type, string(j))
 	}
+	if outputput != nil && *outputput != "0x" {
+		output := *outputput
+		decodedSig, err := hex.DecodeString(output[2:10])
+		if err != nil {
+			return err
+		}
 
-	method, err := cabi.AbiTool.MethodById(decodedSig)
-	if err != nil {
-		return err
+		method, err := cabi.AbiTool.MethodById(decodedSig)
+		if err != nil {
+			return err
+		}
+
+		decodedData, err := hex.DecodeString(output[10:])
+		if err != nil {
+			return err
+		}
+
+		args, err := method.Outputs.Unpack(decodedData)
+		if err != nil {
+			return err
+		}
+
+		j, err := json.Marshal(args)
+		log.Info("out", tag, addr, method.Name, method.Type, string(j))
 	}
-
-	// decode txInput Payload
-	decodedData, err := hex.DecodeString(input[10:])
-	if err != nil {
-		return err
-	}
-
-	args, err := method.Inputs.Unpack(decodedData)
-	if err != nil {
-		return err
-	}
-
-	j, err := json.Marshal(args)
-
-	log.Info("m", addr, method.Name, method.Type, string(j))
 
 	return nil
 }
