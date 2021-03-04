@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -32,8 +33,23 @@ func NewAbi(networkID uint32) (*AbiUtil, error) {
 			return nil, err
 		}
 		contractAbi.AbiTool = abiTool
+
+		for _, ev := range abiTool.Events {
+			evm := abi.NewMethod(ev.Name, ev.RawName, abi.Function, "", false, false, ev.Inputs, abi.Arguments{})
+			contractAbi.EventFunc = append(contractAbi.EventFunc, &evm)
+		}
+
 		abiUtil.Abis[contractAbi.Address] = contractAbi
 	}
 
 	return &abiUtil, nil
+}
+
+func (a *ContractAbi) FindEvent(sigdata []byte) (*abi.Method, error) {
+	for _, method := range a.EventFunc {
+		if bytes.Equal(method.ID, sigdata[:4]) {
+			return method, nil
+		}
+	}
+	return nil, fmt.Errorf("no method with id: %#x", sigdata[:4])
 }

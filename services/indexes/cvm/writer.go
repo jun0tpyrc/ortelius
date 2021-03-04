@@ -359,6 +359,11 @@ func (w *Writer) handleAbi(tag string, cabi *utils.ContractAbi, addr string, ini
 			return err
 		}
 
+		ev, err := cabi.FindEvent(decodedSig)
+		if ev != nil {
+			log.Println(ev)
+		}
+
 		method, err := cabi.AbiTool.MethodById(decodedSig)
 		if err != nil {
 			return err
@@ -386,6 +391,11 @@ func (w *Writer) handleAbi(tag string, cabi *utils.ContractAbi, addr string, ini
 		decodedSig, err := hex.DecodeString(output[2:10])
 		if err != nil {
 			return err
+		}
+
+		ev, err := cabi.FindEvent(decodedSig)
+		if ev != nil {
+			log.Println(ev)
 		}
 
 		method, err := cabi.AbiTool.MethodById(decodedSig)

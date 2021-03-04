@@ -10,6 +10,7 @@ type ContractAbi struct {
 	ConstructorArgs string
 	Abis            string
 	AbiTool         abi.ABI
+	EventFunc       []*abi.Method
 }
 
 var ContractAbis1 = []*ContractAbi{
